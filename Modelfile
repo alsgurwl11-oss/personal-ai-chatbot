@@ -1,0 +1,19 @@
+
+# Personal AI Chatbot
+# Fine-tuned Llama3 8B using PEFT (LoRA)
+# Quantization: GGUF Q4_K_M
+
+# Place the separately exported GGUF file in the models folder.
+FROM ./models/llama3-personal-Q4_K_M.gguf
+
+TEMPLATE """{{ .Prompt }}{{ .Response }}"""
+
+PARAMETER num_ctx 2048
+PARAMETER num_predict 128
+PARAMETER temperature 0
+
+PARAMETER stop "<|end_of_text|>"
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "### Instruction:"
+PARAMETER stop "### Input:"
+PARAMETER stop "### Response:"

@@ -1,0 +1,30 @@
+
+# 개인정보
+data/
+profile.txt
+indata_kor.csv
+*.env
+.env
+.env.*
+
+# 모델 및 학습 가중치
+models/
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# 벡터 데이터베이스
+chroma_db/
+chroma_qa_db/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 기타
+.ipynb_checkpoints/
+*.log
