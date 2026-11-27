@@ -7,8 +7,8 @@
 """
 from __future__ import annotations
 
-import io
 import csv
+import io
 import re
 from datetime import date
 from pathlib import Path
@@ -16,31 +16,30 @@ from pathlib import Path
 import ollama
 import streamlit as st
 
+# Cloud에서는 인증된 ngrok 게이트웨이를 사용하며, 로컬에서는 기존 Ollama 사용.
+# 인증 정보와 개인정보는 코드/GitHub가 아닌 Streamlit Secrets에 보관합니다.
+def optional_secret(key):
+    try:
+        return st.secrets.get(key)
+    except (FileNotFoundError, KeyError):
+        return None
 
-# Streamlit Cloud에서는 인증된 원격 Ollama API 사용
-try:
-    gateway_url = st.secrets["ollama_gateway_url"]
-    gateway_token = st.secrets["ollama_gateway_token"]
-except (FileNotFoundError, KeyError):
-    gateway_url = None
-    gateway_token = None
 
+gateway_url = optional_secret("ollama_gateway_url")
+gateway_token = optional_secret("ollama_gateway_token")
 if gateway_url and gateway_token:
     remote_ollama = ollama.Client(
-        host=gateway_url,
-        headers={
-            "Authorization": f"Bearer {gateway_token}"
-        },
-        timeout=300
+        host=str(gateway_url).rstrip("/"),
+        headers={"Authorization": f"Bearer {gateway_token}"},
+        timeout=300,
     )
-
-    # 기존 ollama.chat() / ollama.generate() 호출 유지
     ollama.chat = remote_ollama.chat
     ollama.generate = remote_ollama.generate
 
+
 st.set_page_config(page_title="개인정보 AI 챗봇", page_icon="🦜")
 st.title("🦜 개인정보 AI 챗봇")
-
+st.caption("PEFT Llama3 · 개인정보 검색 · 일반 상식 · 이전 답변 번역 · 수정 v2")
 
 ROOT = Path(__file__).resolve().parent
 PROFILE = ROOT / "data" / "profile.txt"
@@ -48,43 +47,29 @@ CSV_PATH = ROOT / "data" / "indata_kor.csv"
 PEFT_MODEL = "llama3-personal-fixed:latest"
 BASE_MODEL = "llama3:latest"
 NOT_FOUND = "해당 정보는 등록되어 있지 않습니다."
-
+# 이 앱을 개발한 사람 (공개 GitHub에 이름을 노출하고 싶지 않으면 변경하세요)
+APP_DEVELOPER = "김민혁"
 
 
 @st.cache_data(show_spinner=False)
 def load_personal_data():
-    # Cloud에서는 Streamlit Secrets 사용
-    try:
-        profile = st.secrets["profile_text"]
-        csv_content = st.secrets["csv_text"]
-    except (FileNotFoundError, KeyError):
-        # 로컬에서는 기존 개인정보 파일 사용
+    """Streamlit Cloud Secrets 우선, 로컬에서는 원본 파일 사용."""
+    secret_profile = optional_secret("profile_text")
+    secret_csv = optional_secret("csv_text")
+    if secret_profile is not None and secret_csv is not None:
+        profile = str(secret_profile)
+        csv_content = str(secret_csv)
+    else:
         profile = PROFILE.read_text(encoding="utf-8-sig")
         csv_content = CSV_PATH.read_text(encoding="utf-8-sig")
-
-    reader = csv.DictReader(io.StringIO(csv_content.lstrip("\ufeff")))
     rows = []
-
+    reader = csv.DictReader(io.StringIO(csv_content.lstrip("\ufeff\r\n")))
     for row in reader:
-        question = (
-            row.get("inputs")
-            or row.get("instruction")
-            or row.get("question")
-            or ""
-        ).strip()
-
-        answer = (
-            row.get("response")
-            or row.get("output")
-            or row.get("answer")
-            or ""
-        ).strip()
-
+        question = (row.get("inputs") or row.get("instruction") or row.get("question") or "").strip()
+        answer = (row.get("response") or row.get("output") or row.get("answer") or "").strip()
         if question and answer:
             rows.append((question, answer))
-
     return profile, rows
-
 
 
 try:
@@ -125,21 +110,13 @@ def categories(text):
 
 
 def is_personal(question):
-    q = norm(question)
     cats = categories(question)
-    # 특정 인물을 지칭해도 질문 대상이 없으면 데이터에서 근거를 찾지 않습니다.
     if not cats:
         return False
-    general_context = (
-        "대한민국", "한국의", "세계", "일반적으로", "뜻", "정의", "원리",
-        "무엇인가", "차이", "예시", "사용법", "역할", "수도", "국가", "나라"
-    )
-    if any(term in q for term in general_context):
+    if is_general_context(question):
         return False
-    if any(term in q for term in ("김민혁", "민혁", "본인", "그학생", "그사람", "나의", "저의", "내가", "나는", "제가", "제")):
-        return True
-    # 사용자가 이름을 생략한 개인정보 질문 ("주소는?", "가족은?")
     return True
+
 
 
 def read_profile():
@@ -244,6 +221,35 @@ def generate_personal(question, facts):
     return clean(output["response"])
 
 
+def chatbot_identity_answer(question):
+    """앱 개발자와 기반 LLM 개발사를 구별해서 사실대로 응답합니다.
+
+    챗봇의 제작 정보는 LLM에 맡기지 않습니다(임의 생성 방지).
+    """
+    q = norm(question)
+    asks_creator = any(w in q for w in (
+        "누가만들", "누가개발", "누가제작", "누가창조",
+        "만든사람", "만든분", "만든이는", "개발자는", "제작자는",
+        "누구가만들", "어디서만들", "누가만든"
+    )) or (
+        any(w in q for w in ("만들", "개발", "제작", "창조"))
+        and any(w in q for w in ("누구", "누가", "어디", "회사"))
+    )
+    self_reference = any(w in q for w in (
+        "너", "넌", "널", "네가", "니가", "당신", "너희", "너를",
+        "챗봇", "이봇", "이ai", "이프로그램", "이서비스"
+    ))
+    if "llama3" in q and asks_creator and not self_reference:
+        return "기반 언어 모델 Llama3는 Meta에서 개발했습니다."
+    if self_reference and asks_creator:
+        return f"{APP_DEVELOPER}입니다."
+    if (q in ("너는누구야", "넌누구야", "너누구야", "너는뭐야", "넌뭐야", "넌누구니")
+            or (self_reference and any(x in q for x in ("정체", "무슨모델", "어떤모델")))):
+        return (f"저는 {APP_DEVELOPER} 님이 개발한 개인 맞춤형 AI 챗봇입니다. "
+                "Meta의 Llama3 기반 모델을 Ollama로 실행합니다.")
+    return None
+
+
 def general_answer(question):
     # 기존 개인정보 대화를 전달하지 않아 상식 질문에 주소/전공이 섞이지 않도록 합니다.
     output = ollama.chat(
@@ -258,22 +264,50 @@ def general_answer(question):
 
 
 def translate(text, language="English"):
-    """로컬 Llama3를 이용해 지정된 언어로 번역합니다."""
+    """답변 문자열만 번역하며 빈 문자열/None/엉뚱한 응답을 출력하지 않습니다."""
     if language not in ("English", "Korean"):
         raise ValueError("Unsupported translation language")
+    source = clean(str(text or "")).strip()
+    if not source or source.casefold() in ("none", "null"):
+        return "번역할 이전 답변이 없습니다."
+
+    # 매우 짧은 사실 응답은 생성형 모델이 문장을 새로 만들지 않도록 확정 번역.
+    normalized = re.sub(r"[\s.!?。]+$", "", source).strip()
+    known_english = {
+        "서울입니다": "It is Seoul.",
+        "서울이에요": "It is Seoul.",
+        "서울": "Seoul.",
+        "대한민국의 수도는 서울입니다": "The capital of South Korea is Seoul.",
+        "한국의 수도는 서울입니다": "The capital of South Korea is Seoul.",
+        "안녕하세요": "Hello.",
+        "축구 시청": "Watching soccer.",
+        "축구 시청입니다": "My hobby is watching soccer.",
+    }
+    if language == "English" and normalized in known_english:
+        return known_english[normalized]
+
+    system = (
+        f"You are a professional {language} translator, NOT a chat assistant. "
+        "Translate only the exact SOURCE text supplied by the user. "
+        "Never reply to its contents, never add information, never continue a dialogue. "
+        "Keep names, numbers, and meanings intact. Output translation only."
+    )
     output = ollama.chat(
         model=BASE_MODEL,
         messages=[
-            {"role": "system", "content": (
-                f"You are a professional translator. Translate the provided text into {language}. "
-                "Return ONLY the translated text, without explanations. Preserve names and numbers. "
-                "Never answer the original question; translate the provided answer exactly."
-            )},
-            {"role": "user", "content": f"Translate into {language}:\n\n{text}"},
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Translate this SOURCE to {language}:\n<source>\n{source}\n</source>"},
         ],
-        options={"temperature": 0, "num_ctx": 2048, "num_predict": 250},
+        options={"temperature": 0, "num_ctx": 2048, "num_predict": 200},
     )
-    return clean(output["message"]["content"])
+    response = clean(str(output.get("message", {}).get("content") or "")).strip()
+    invalid = {"none", "null", "undefined", "n/a", ""}
+    if response.casefold().strip(" .!\n") in invalid:
+        return "번역 결과를 생성하지 못했습니다. 다시 요청해 주세요."
+    # 모델이 원문의 지시를 실행하며 내놓는 흔한 환각 문구를 차단합니다.
+    if language == "English" and ("let's start now" in response.lower() or "lets start now" in response.lower()) and "시작" not in source:
+        return "번역 결과가 원문과 맞지 않습니다. 다시 요청해 주세요."
+    return response
 
 
 def english_requested(question):
@@ -283,7 +317,12 @@ def english_requested(question):
 
 def previous_answer_requested(question):
     q = norm(question)
-    return any(x in q for x in ("방금", "직전", "이전답변", "마지막답변", "네답변", "너의답변", "아까", "그답변", "위답변"))
+    return any(x in q for x in (
+        "방금", "직전", "이전답변", "마지막답변", "네답변", "너의답변",
+        "아까", "그답변", "위답변", "위의말", "위에말", "위에한말", "위의답변", "위문장", "그말", "직전말",
+        "방금한말", "앞의말", "앞의답변", "방금한답변", "이말", "이답변",
+        "첫번째", "첫째", "두번째", "둘째", "세번째", "셋째"
+    )) or bool(re.search(r"\d+번째", q))
 
 
 def remove_english_instruction(question):
@@ -347,6 +386,18 @@ def remove_language_instruction(question):
     q = re.sub(r"(?:영어로|영문으로|한국어로|한글로|우리말로|국문으로)\s*(?:번역해서|번역해|바꿔서|바꿔|말해줘|말해|알려줘|해줘|써줘|답해줘)?", "", question, flags=re.IGNORECASE)
     q = re.sub(r"(?:translate\s+into\s+(?:english|korean)|in\s+(?:english|korean)|to\s+korean)", "", q, flags=re.IGNORECASE)
     return q.strip(" \t.?!,，")
+
+
+
+def format_personal_answer(question, answer):
+    """국문 단일 학번/연락처 답변만 문장형으로 만듭니다."""
+    if not answer or answer == NOT_FOUND or "\n" in answer:
+        return answer
+    requested = categories(question)
+    if len(requested) == 1 and ("학번" in requested or "연락처" in requested):
+        if not answer.strip().endswith(("입니다.", "입니다", "이에요.", "예요.")):
+            return answer.strip().rstrip(".") + "입니다."
+    return answer
 
 
 def direct_fact(question, facts, exact):
@@ -426,6 +477,181 @@ def age_answer(question, today=None):
     return f"{as_of} 만 {age}세입니다. ({birth_label})"
 
 
+def blood_type_requested(question):
+    """혈액형만 묻는 개인정보 질문인지 검사합니다."""
+    return categories(question) == {"혈액형"} and not is_general_context(question)
+
+
+def blood_type_answer():
+    """혈액형 항목에 명시된 값만 인정합니다. 학번 등의 잘못된 연결은 거부합니다."""
+    blood_value = re.compile(
+        r"(?i)^\s*(?:(?:제|저의|내|본인)\s*)?"
+        r"(?:(?:혈액형)\s*(?:은|는|이|가)?\s*)?"
+        r"(?:(Rh\s*[+-])\s*)?(AB|A|B|O)\s*형"
+        r"(?:\s*(?:입니다|이에요|예요|이다))?\s*\.?\s*$"
+    )
+    values = set()
+
+    def parse(value):
+        match = blood_value.fullmatch(str(value).strip())
+        if not match:
+            return None
+        rh, abo = match.groups()
+        prefix = re.sub(r"\s+", "", rh.upper()) if rh else ""
+        return f"{prefix}{abo.upper()}형"
+
+    for _, field, value in profile_fields:
+        if "혈액형" in norm(field):
+            item = parse(value)
+            if item:
+                values.add(item)
+
+    for saved_q, saved_a in qa_rows:
+        if categories(saved_q) == {"혈액형"}:
+            item = parse(saved_a)
+            if item:
+                values.add(item)
+
+    return next(iter(values)) if len(values) == 1 else NOT_FOUND
+
+
+# 실제 질문에 등장한 명시적 연결어만 절단합니다.
+# 예: '내 주소와 대한민국 수도는?', '내 전공과 취미를 알려줘'
+COMPOUND_ITEMS = (
+    "전화번호", "휴대폰", "핸드폰", "연락처", "생년월일", "혈액형", "이메일",
+    "학생번호", "학번", "전공", "학과", "학교", "대학교", "학년", "주소",
+    "거주지", "가족", "취미", "특기", "자격증", "나이", "생일", "수도",
+    "게임", "축구팀", "이름", "음식", "졸업"
+)
+NEXT_ITEMS = COMPOUND_ITEMS + (
+    "내", "나의", "저의", "제", "대한민국", "한국", "일반적으로", "세계", "국가", "나라"
+)
+_COMPOUND_PATTERN = re.compile(
+    r"(" + "|".join(map(re.escape, sorted(COMPOUND_ITEMS, key=len, reverse=True))) + r")"
+    r"(?:와|과)\s*(?=(?:" + "|".join(map(re.escape, sorted(NEXT_ITEMS, key=len, reverse=True))) + r"))"
+)
+
+
+def split_compound_question(question):
+    """명시적인 나열/접속 형태에 한해 질문을 독립 항목으로 나눕니다."""
+    marked = _COMPOUND_PATTERN.sub(r"\1 ||| ", question)
+    marked = re.sub(r"\s*(?:그리고|및)\s*", " ||| ", marked)
+    return [part.strip(" ,?!.\t") for part in marked.split("|||") if part.strip(" ,?!.\t")]
+
+
+def is_general_context(question):
+    q = norm(question)
+    return any(term in q for term in (
+        "대한민국", "한국의", "세계", "일반적으로", "뜻", "정의", "원리",
+        "무엇인가", "차이", "예시", "사용법", "역할", "수도", "국가", "나라",
+        "무엇을배우", "어떤것을배우", "무슨뜻"
+    ))
+
+
+def personal_category_answer(cat, question):
+    """복합 질문은 항목별로 검색하고 교차 혼합 및 모델의 근거 없는 생성을 막습니다."""
+    if cat == "혈액형":
+        return blood_type_answer()
+    if cat == "생일" and age_requested(question):
+        return age_answer(question)
+    matches = []
+    for section, field, value in profile_fields:
+        if not value:
+            continue
+        if field and any(norm(a) in norm(field) for a in ALIASES[cat]):
+            matches.append(value)
+        elif not field and cat == "가족" and "가족" in norm(section):
+            matches.append(value)
+    if not matches:
+        for saved_q, saved_a in qa_rows:
+            if categories(saved_q) == {cat} and saved_a != NOT_FOUND:
+                matches.append(saved_a)
+    matches = list(dict.fromkeys(matches))
+    if len(matches) == 1:
+        return matches[0]
+    return NOT_FOUND
+
+
+def answer_one_question(question):
+    """각 질문을 올바른 모델/데이터 경로로 라우팅합니다."""
+    identity = chatbot_identity_answer(question)
+    if identity is not None:
+        return identity
+    if age_requested(question) and len(categories(question)) <= 1:
+        return age_answer(question)
+    if blood_type_requested(question):
+        return blood_type_answer()
+    if intro_requested(question):
+        return introduction()
+    if is_personal(question):
+        facts, exact = related_personal_facts(question)
+        if not facts:
+            return NOT_FOUND
+        direct = direct_fact(question, facts, exact)
+        if direct is not None:
+            return direct
+        with st.spinner("PEFT 개인정보 답변 생성 중..."):
+            return generate_personal(question, facts) or NOT_FOUND
+    with st.spinner("일반 질문 답변 생성 중..."):
+        return general_answer(question)
+
+
+def answer_compound_question(question):
+    """개인정보와 일반 상식을 각각 처리하고 결과만 조합합니다."""
+    parts = split_compound_question(question)
+    if len(parts) <= 1:
+        cats = categories(question)
+        # 분할이 어려운 나열은 개인정보 항목별로 안전하게 처리합니다.
+        if len(cats) >= 2 and not is_general_context(question):
+            lines = []
+            for cat in ALIASES:
+                if cat in cats:
+                    value = personal_category_answer(cat, question)
+                    lines.append(f"{cat}: {value}")
+            return "\n".join(lines)
+        return answer_one_question(question)
+
+    outputs = []
+    for part in parts:
+        cats = categories(part)
+        if len(cats) == 1 and not is_general_context(part):
+            cat = next(iter(cats))
+            value = personal_category_answer(cat, part)
+            outputs.append(f"{cat}: {value}")
+        elif len(cats) > 1 and not is_general_context(part):
+            for cat in ALIASES:
+                if cat in cats:
+                    outputs.append(f"{cat}: {personal_category_answer(cat, part)}")
+        else:
+            outputs.append(answer_one_question(part))
+    return "\n".join(outputs)
+
+
+def history_target(question, messages):
+    """직전 답변 외에 첫 번째/두 번째/N번째 AI 답변도 지정할 수 있습니다."""
+    answers = [m["content"] for m in messages if m.get("role") == "assistant"]
+    if not answers:
+        return None
+    q = norm(question)
+    if any(x in q for x in ("첫번째", "첫째", "첫번", "처음답변")):
+        index = 1
+    elif any(x in q for x in ("두번째", "둘째", "두번")):
+        index = 2
+    elif any(x in q for x in ("세번째", "셋째")):
+        index = 3
+    else:
+        match = re.search(r"(\d+)번째", q)
+        index = int(match.group(1)) if match else None
+    if index is not None:
+        return answers[index - 1] if 1 <= index <= len(answers) else None
+    return answers[-1]
+
+
+def needs_previous_answer(question):
+    return bool(requested_translation_language(question) and previous_answer_requested(question)
+                and translation_intent(question))
+
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -439,43 +665,25 @@ if user_question := st.chat_input("질문을 입력해 주세요"):
     with st.chat_message("assistant"):
         try:
             qn = norm(user_question)
-            last_reply = next((m["content"] for m in reversed(st.session_state.messages)
-                               if m["role"] == "assistant"), None)
             if qn in ("ㅎㅇ", "안녕", "안녕하세요", "하이", "hi", "hello"):
                 answer = "안녕하세요! 무엇을 도와드릴까요?"
-            elif (lang := requested_translation_language(user_question)) and previous_answer_requested(user_question) and translation_intent(user_question):
-                if last_reply:
-                    with st.spinner("직전 답변 번역 중..."):
-                        answer = translate(last_reply, lang)
+            elif needs_previous_answer(user_question):
+                target = history_target(user_question, st.session_state.messages)
+                if target is None:
+                    answer = "요청한 이전 답변을 찾을 수 없습니다."
                 else:
-                    answer = "아직 번역할 이전 답변이 없습니다."
+                    lang = requested_translation_language(user_question)
+                    with st.spinner("이전 답변 번역 중..."):
+                        answer = translate(target, lang)
             else:
                 lang = requested_translation_language(user_question)
                 current_question = remove_language_instruction(user_question) if lang else user_question
                 current_question = current_question or user_question
-
-                if age_requested(current_question):
-                    answer = age_answer(current_question)
-                elif intro_requested(current_question):
-                    answer = introduction()
-                elif is_personal(current_question):
-                    facts, exact = related_personal_facts(current_question)
-                    if not facts:
-                        answer = NOT_FOUND
-                    else:
-                        direct = direct_fact(current_question, facts, exact)
-                        if direct is not None:
-                            answer = direct
-                        else:
-                            with st.spinner("PEFT 개인정보 답변 생성 중..."):
-                                answer = generate_personal(current_question, facts)
-                            if not answer:
-                                answer = NOT_FOUND
-                else:
-                    with st.spinner("일반 질문 답변 생성 중..."):
-                        answer = general_answer(current_question)
-
-                if lang and answer != NOT_FOUND:
+                answer = answer_compound_question(current_question)
+                # 국문 응답에만 문장 어미를 붙입니다. 번역된 영어에 한글이 남지 않게 합니다.
+                if lang is None:
+                    answer = format_personal_answer(current_question, answer)
+                elif answer != NOT_FOUND:
                     with st.spinner("번역 중..."):
                         answer = translate(answer, lang)
 
