@@ -16,6 +16,28 @@ from pathlib import Path
 import ollama
 import streamlit as st
 
+
+# Streamlit Cloud에서는 인증된 원격 Ollama API 사용
+try:
+    gateway_url = st.secrets["ollama_gateway_url"]
+    gateway_token = st.secrets["ollama_gateway_token"]
+except (FileNotFoundError, KeyError):
+    gateway_url = None
+    gateway_token = None
+
+if gateway_url and gateway_token:
+    remote_ollama = ollama.Client(
+        host=gateway_url,
+        headers={
+            "Authorization": f"Bearer {gateway_token}"
+        },
+        timeout=300
+    )
+
+    # 기존 ollama.chat() / ollama.generate() 호출 유지
+    ollama.chat = remote_ollama.chat
+    ollama.generate = remote_ollama.generate
+
 st.set_page_config(page_title="개인정보 AI 챗봇", page_icon="🦜")
 st.title("🦜 개인정보 AI 챗봇")
 
