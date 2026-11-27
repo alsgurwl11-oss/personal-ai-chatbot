@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import io
 import csv
 import re
 from datetime import date
@@ -27,18 +28,41 @@ BASE_MODEL = "llama3:latest"
 NOT_FOUND = "해당 정보는 등록되어 있지 않습니다."
 
 
+
 @st.cache_data(show_spinner=False)
 def load_personal_data():
-    profile = PROFILE.read_text(encoding="utf-8-sig")
-    with CSV_PATH.open(newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        rows = []
-        for row in reader:
-            question = (row.get("inputs") or row.get("instruction") or row.get("question") or "").strip()
-            answer = (row.get("response") or row.get("output") or row.get("answer") or "").strip()
-            if question and answer:
-                rows.append((question, answer))
+    # Cloud에서는 Streamlit Secrets 사용
+    try:
+        profile = st.secrets["profile_text"]
+        csv_content = st.secrets["csv_text"]
+    except (FileNotFoundError, KeyError):
+        # 로컬에서는 기존 개인정보 파일 사용
+        profile = PROFILE.read_text(encoding="utf-8-sig")
+        csv_content = CSV_PATH.read_text(encoding="utf-8-sig")
+
+    reader = csv.DictReader(io.StringIO(csv_content.lstrip("\ufeff")))
+    rows = []
+
+    for row in reader:
+        question = (
+            row.get("inputs")
+            or row.get("instruction")
+            or row.get("question")
+            or ""
+        ).strip()
+
+        answer = (
+            row.get("response")
+            or row.get("output")
+            or row.get("answer")
+            or ""
+        ).strip()
+
+        if question and answer:
+            rows.append((question, answer))
+
     return profile, rows
+
 
 
 try:
