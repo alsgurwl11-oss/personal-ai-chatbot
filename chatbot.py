@@ -39,7 +39,7 @@ if gateway_url and gateway_token:
 
 st.set_page_config(page_title="개인정보 AI 챗봇", page_icon="🦜")
 st.title("🦜 개인정보 AI 챗봇")
-st.caption("PEFT Llama3 · 개인정보 검색 · 일반 상식 · 이전 답변 번역 · 수정 v2")
+st.caption("PEFT Llama3 · 개인정보 검색 · 일반 상식 · 이전 답변 번역 · 수정 v3")
 
 ROOT = Path(__file__).resolve().parent
 PROFILE = ROOT / "data" / "profile.txt"
@@ -286,6 +286,20 @@ def translate(text, language="English"):
     if language == "English" and normalized in known_english:
         return known_english[normalized]
 
+    # 짧은 고정 표현은 역번역도 직접 처리해 모델이 엉뚱한 응답을 내지 않게 합니다.
+    known_korean = {
+        "It is Seoul": "서울입니다.",
+        "It's Seoul": "서울입니다.",
+        "Seoul": "서울입니다.",
+        "The capital of South Korea is Seoul": "대한민국의 수도는 서울입니다.",
+        "The capital of Korea is Seoul": "대한민국의 수도는 서울입니다.",
+        "Hello": "안녕하세요.",
+        "Watching soccer": "축구 시청입니다.",
+        "My hobby is watching soccer": "제 취미는 축구 시청입니다.",
+    }
+    if language == "Korean" and normalized in known_korean:
+        return known_korean[normalized]
+
     system = (
         f"You are a professional {language} translator, NOT a chat assistant. "
         "Translate only the exact SOURCE text supplied by the user. "
@@ -318,7 +332,7 @@ def english_requested(question):
 def previous_answer_requested(question):
     q = norm(question)
     return any(x in q for x in (
-        "방금", "직전", "이전답변", "마지막답변", "네답변", "너의답변",
+        "방금", "직전", "이전답변", "마지막답변", "네답변", "너의답변", "다시", "원래대로", "되돌려", "그걸", "그거", "그것", "그문장", "방금영어",
         "아까", "그답변", "위답변", "위의말", "위에말", "위에한말", "위의답변", "위문장", "그말", "직전말",
         "방금한말", "앞의말", "앞의답변", "방금한답변", "이말", "이답변",
         "첫번째", "첫째", "두번째", "둘째", "세번째", "셋째"
@@ -648,8 +662,16 @@ def history_target(question, messages):
 
 
 def needs_previous_answer(question):
-    return bool(requested_translation_language(question) and previous_answer_requested(question)
-                and translation_intent(question))
+    lang = requested_translation_language(question)
+    if not lang or not translation_intent(question):
+        return False
+    if previous_answer_requested(question):
+        return True
+    # '한국어로 번역해줘'처럼 번역할 문장이 없는 지시만 있는 경우:
+    # 직전 답변을 번역하라는 후속 요청으로 처리합니다.
+    remaining = remove_language_instruction(question)
+    remaining = re.sub(r"(?:번역|바꿔|옮겨|다시|해줘|해주세요|해|말해줘|알려줘|줘|주세요|좀|을|를|로|으로|해석|해석해줘)", "", remaining)
+    return not norm(remaining)
 
 
 if "messages" not in st.session_state:
